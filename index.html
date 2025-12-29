@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Three.js 沉浸式手势粒子交互</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+        }
+
+        /* 隐藏视频元素，实现沉浸式 */
+        #video-input {
+            position: absolute;
+            top: 0;
+            left: 0;
+            opacity: 0;
+            pointer-events: none;
+            z-index: -1;
+        }
+
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-family: Arial, sans-serif;
+            font-size: 24px;
+            pointer-events: none;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+
+<body>
+
+    <div id="loading">正在初始化摄像头与AI模型，请稍候...<br><small>请确保允许摄像头权限</small></div>
+    <video id="video-input"></video>
+    <div id="canvas-container"></div>
+
+    <script>
+        // --- 1. 全局变量与配置 ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+
+        let particles;
+        let particleGeometry;
+        const particleCount = 4000; // 粒子总数
+        const particleSize = 0.6;
+
+        // 存储当前显示的文字的目标位置
+        let targetPositions = [];
+        // 交互点（右手位置）
+        let interactionPoint = new THREE.Vector3(9999, 9999, 9999);
+        let isFist = false; // 右手是否握拳
+
+        // 初始化 Three.js 环境
+        function initThree() {
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+            camera.position.z = 100;
+
+            // 创建粒子系统
+            particleGeometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(particleCount * 3);
+            const colors = new Float32Array(particleCount * 3);
+
+            for (let i = 0; i < particleCount; i++) {
+                positions[i * 3] = (Math.random() - 0.5) * 200;
+                positions[i * 3 + 1] = (Math.random() - 0.5) * 100;
+                positions[i * 3 + 2] = (Math.random() - 0.5) * 50;
+
+                colors[i * 3] = 0.0;
+                colors[i * 3 + 1] = 0.8; // 青色
+                colors[i * 3 + 2] = 1.0;
+            }
+
+            particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            particleGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            // 粒子材质
+            const material = new THREE.PointsMaterial({
+                size: particleSize,
+                vertexColors: true,
+                blending: THREE.AdditiveBlending,
+                depthTest: false,
+                transparent: true,
+                opacity: 0.8
+            });
+
+            particles = new THREE.Points(particleGeometry, material);
+            scene.add(particles);
+
+            // 初始文字
+            updateTextTarget("Welcome");
+            animate();
+        }
+
+        // --- 2. 文字转粒子核心逻辑 ---
+        function updateTextTarget(text) {
+            // 创建一个临时的 2D Canvas 来绘制文字
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            const width = 300;
+            const height = 150;
+            canvas.width = width;
+            canvas.height = height;
+
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, 0, width, height);
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'Bold 40px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, width / 2, height / 2);
+
+            // 获取像素数据
+            const imageData = ctx.getImageData(0, 0, width, height);
+            const data = imageData.data;
+
+            let validPoints = [];
+
+            // 扫描像素，找到白色的点（文字部分）
+            for (let y = 0; y < height; y += 2) { // 步长决定采样密度
+                for (let x = 0; x < width; x += 2) {
+                    const index = (y * width + x) * 4;
+                    if (data[index] > 128) { // 红色通道 > 128 认为是文字
+                        // 将 2D 坐标映射到 3D 空间
+                        validPoints.push(new THREE.Vector3(
+                            (x - width / 2) * 0.8,
+                            -(y - height / 2) * 0.8,
+                            0
+                        ));
+                    }
+                }
+            }
+
+            // 更新目标位置数组
+            // 如果文字点少于粒子总数，剩下的粒子随机漂浮
+            // 如果文字点多，则截断
+            targetPositions = [];
+            for (let i = 0; i < particleCount; i++) {
+                if (i < validPoints.length) {
+                    targetPositions.push(validPoints[i]);
+                } else {
+                    // 多余的粒子作为背景噪点
+                    targetPositions.push(new THREE.Vector3(
+                        (Math.random() - 0.5) * 300,
+                        (Math.random() - 0.5) * 150,
+                        (Math.random() - 0.5) * 100
+                    ));
+                }
+            }
+        }
+
+        // --- 3. 动画与物理循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const positions = particles.geometry.attributes.position.array;
+
+            for (let i = 0; i < particleCount; i++) {
+                const px = positions[i * 3];
+                const py = positions[i * 3 + 1];
+                const pz = positions[i * 3 + 2];
+
+                // 1. 基础运动：飞向目标文字位置
+                let tx = targetPositions[i] ? targetPositions[i].x : px;
+                let ty = targetPositions[i] ? targetPositions[i].y : py;
+                let tz = targetPositions[i] ? targetPositions[i].z : pz;
+
+                // 2. 右手交互逻辑
+                const dist = Math.sqrt(
+                    Math.pow(px - interactionPoint.x, 2) +
+                    Math.pow(py - interactionPoint.y, 2)
+                );
+
+                // 交互半径
+                const radius = 30;
+
+                if (dist < radius) {
+                    if (isFist) {
+                        // 握拳：吸引力 (黑洞效果)
+                        tx = interactionPoint.x + (px - interactionPoint.x) * 0.1;
+                        ty = interactionPoint.y + (py - interactionPoint.y) * 0.1;
+                        tz = interactionPoint.z + (pz - interactionPoint.z) * 0.1;
+                    } else {
+                        // 张开：斥力 (打散效果)
+                        const force = (radius - dist) / radius;
+                        const angle = Math.atan2(py - interactionPoint.y, px - interactionPoint.x);
+                        tx += Math.cos(angle) * force * 50;
+                        ty += Math.sin(angle) * force * 50;
+                    }
+                }
+
+                // 平滑插值更新位置 (Lerp)
+                positions[i * 3] += (tx - px) * 0.08;
+                positions[i * 3 + 1] += (ty - py) * 0.08;
+                positions[i * 3 + 2] += (tz - pz) * 0.08;
+            }
+
+            particles.geometry.attributes.position.needsUpdate = true;
+            renderer.render(scene, camera);
+        }
+
+        // --- 4. MediaPipe 手势识别逻辑 ---
+
+        // 计算手指伸出数量
+        function countFingers(landmarks) {
+            let count = 0;
+            const tips = [8, 12, 16, 20]; // 食指、中指、无名指、小指尖
+            const pips = [6, 10, 14, 18]; // 对应的关节
+
+            // 拇指单独判断 (根据X轴判断)
+            // 注意：左右手拇指方向相反，这里简化处理，主要靠另外4指
+
+            // 只有食指、中指、无名指用于 1, 2, 3 的判断比较准确
+            if (landmarks[8].y < landmarks[6].y) count++; // 食指
+            if (landmarks[12].y < landmarks[10].y) count++; // 中指
+            if (landmarks[16].y < landmarks[14].y) count++; // 无名指
+
+            return count;
+        }
+
+        // 判断是否握拳 (所有指尖到掌心距离都很小)
+        function checkFist(landmarks) {
+            const palm = landmarks[0]; // 掌心大致位置
+            let totalDist = 0;
+            const tips = [8, 12, 16, 20];
+
+            tips.forEach(idx => {
+                const d = Math.sqrt(
+                    Math.pow(landmarks[idx].x - palm.x, 2) +
+                    Math.pow(landmarks[idx].y - palm.y, 2)
+                );
+                totalDist += d;
+            });
+
+            // 阈值需要调试，通常握拳时平均距离很小
+            return (totalDist / 4) < 0.15; // 0.15 是归一化坐标下的阈值
+        }
+
+        function onResults(results) {
+            // 隐藏 loading
+            document.getElementById('loading').style.display = 'none';
+
+            // 重置交互点到屏幕外，防止手消失后粒子还受到影响
+            interactionPoint.set(9999, 9999, 9999);
+
+            if (results.multiHandLandmarks && results.multiHandedness) {
+                for (let index = 0; index < results.multiHandLandmarks.length; index++) {
+                    const classification = results.multiHandedness[index];
+                    const isRightHand = classification.label === 'Right'; // MediaPipe是自拍模式，label通常是反的，需实际调试
+                    // 修正：MediaPipe在自拍模式下，Label 'Left' 实际上是用户的左手（屏幕右侧），Label 'Right' 是用户右手
+                    // 但为了严谨，我们通常通过屏幕位置辅助判断，或者直接信任 Label
+
+                    const landmarks = results.multiHandLandmarks[index];
+
+                    // 将手部坐标映射到 Three.js 3D 空间
+                    // 屏幕中心是 (0,0), 范围大概是 -80 到 80
+                    const handX = (0.5 - landmarks[9].x) * 200;
+                    const handY = (0.5 - landmarks[9].y) * 150;
+
+                    // --- 逻辑分支 ---
+
+                    if (classification.label === 'Left') {
+                        // === 左手：负责切换文字 ===
+                        const fingers = countFingers(landmarks);
+
+                        if (fingers === 1) updateTextTarget("Hello");
+                        else if (fingers === 2) updateTextTarget("2026");
+                        else if (fingers === 3) updateTextTarget("I Love You");
+
+                    } else {
+                        // === 右手：负责交互 ===
+                        interactionPoint.set(handX, handY, 0);
+
+                        if (checkFist(landmarks)) {
+                            isFist = true;
+                            // 稍微改变颜色提示
+                            particles.material.color.setHex(0xff0000);
+                        } else {
+                            isFist = false;
+                            particles.material.color.setHex(0xffffff);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 初始化 MediaPipe Hands
+        const hands = new Hands({
+            locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+            }
+        });
+
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        // 启动摄像头
+        const videoElement = document.getElementById('video-input');
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({ image: videoElement });
+            },
+            width: 1280,
+            height: 720
+        });
+
+        // 启动程序
+        initThree();
+        cameraUtils.start();
+
+        // 窗口大小调整
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+    </script>
+</body>
+
+</html>
