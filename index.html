@@ -306,7 +306,8 @@
         // 初始化 MediaPipe Hands
         const hands = new Hands({
             locateFile: (file) => {
-                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                // return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                return `models/${file}`;
             }
         });
 
